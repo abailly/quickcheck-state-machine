@@ -17,5 +17,5 @@ spec = do
 
   describe "Parallel property" $
 
-    xit "`prop_crudWebserverFileParallel`: parallel property fails, because of file handle's busy"
+    it "`prop_crudWebserverFileParallel`: parallel property holds"
       prop_crudWebserverFileParallel

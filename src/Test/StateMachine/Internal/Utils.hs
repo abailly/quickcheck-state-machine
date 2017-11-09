@@ -14,6 +14,10 @@
 
 module Test.StateMachine.Internal.Utils where
 
+import           Control.Concurrent.STM
+                   (atomically)
+import           Control.Concurrent.STM.TChan
+                   (TChan, tryReadTChan)
 import           Data.List
                    (group, sort)
 import           Test.QuickCheck
@@ -110,3 +114,14 @@ dropLast n xs = zipWith const xs (drop n xs)
 -- | Indexing starting from the back of a list.
 toLast :: Int -> [a] -> a
 toLast n = last . dropLast n
+
+------------------------------------------------------------------------
+
+getChanContents :: TChan a -> IO [a]
+getChanContents chan = reverse <$> atomically (go [])
+  where
+  go acc = do
+    mx <- tryReadTChan chan
+    case mx of
+      Just x  -> go $ x : acc
+      Nothing -> return acc

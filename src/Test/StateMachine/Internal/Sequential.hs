@@ -20,6 +20,7 @@
 
 module Test.StateMachine.Internal.Sequential
   ( generateProgram
+  , generateProgram'
   , filterInvalid
   , getUsedVars
   , liftShrinkInternal
@@ -31,7 +32,8 @@ module Test.StateMachine.Internal.Sequential
 import           Control.Monad
                    (filterM, when)
 import           Control.Monad.State
-                   (State, StateT, evalState, get, lift, put)
+                   (State, StateT, evalState, evalStateT, get, lift,
+                   put)
 import           Data.Dynamic
                    (toDyn)
 import           Data.Functor.Classes
@@ -75,6 +77,14 @@ generateProgram generator precondition transition index = do
     put (transition model act (Success sym))
     acts <- go (sz - 1) (ix + 1)
     return (Internal act sym : acts)
+
+generateProgram'
+  :: Generator    model act
+  -> Precondition model act
+  -> Transition'  model act err
+  -> model Symbolic
+  -> Gen (Program act)
+generateProgram' g p t = evalStateT (generateProgram g p t 0)
 
 -- | Filter out invalid actions from a program. An action is invalid if
 --   either its pre-condition doesn't hold, or it uses references that

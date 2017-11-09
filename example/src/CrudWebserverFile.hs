@@ -34,9 +34,9 @@
 ------------------------------------------------------------------------
 
 module CrudWebserverFile
- --  ( prop_crudWebserverFile
- --  , prop_crudWebserverFileParallel
- --  )
+  ( prop_crudWebserverFile
+  , prop_crudWebserverFileParallel
+  )
   where
 
 import           Control.Concurrent
@@ -69,10 +69,12 @@ import           Servant.Client
                    (BaseUrl(..), Client, ClientEnv(..), Scheme(..),
                    client, runClientM)
 import           Servant.Server
-                   (Server, serve)
+                   (Application, Server, serve)
 import qualified System.Directory            as Directory
+import           System.FileLock
+                   (SharedExclusive(..), lockFile, unlockFile)
 import           System.FilePath
-                   ((</>))
+                   ((<.>), (</>))
 import           Test.QuickCheck
                    (Gen, Property, arbitrary, elements, frequency,
                    shrink, (===))
@@ -82,12 +84,6 @@ import           Test.QuickCheck.Instances
 import           Test.StateMachine
 import           Test.StateMachine.TH
                    (deriveTestClasses)
-
--- XXX:
-import           Test.QuickCheck (sample')
-import           Control.Monad.State
-import           Test.StateMachine.Internal.Sequential
-import           Test.StateMachine.Internal.Parallel
 
 ------------------------------------------------------------------------
 
@@ -126,7 +122,7 @@ getFile dir file = liftIO (Text.readFile (dir </> file))
 
 -- | Handler for the `DeleteFile` endpoint
 deleteFile :: FilePath -> Server DeleteFile
-deleteFile dir file = liftIO (Directory.removeFile (dir </> file))
+deleteFile dir file = liftIO (Directory.removePathForcibly (dir </> file))
 
 -- | Handler for the entire REST `API`
 server :: FilePath -> Server API
@@ -135,11 +131,17 @@ server dir
   :<|> getFile dir
   :<|> deleteFile dir
 
+app :: FilePath -> Application
+app dir req respond = bracket
+  (lockFile (dir </> "lock") Exclusive)
+  unlockFile
+  (const (serve (Proxy :: Proxy API) (server dir) req respond))
+
 -- | Serve the `API` on port 8080
 runServer :: IO () -> IO ()
 runServer ready = do
   dir <- Directory.getTemporaryDirectory
-  Warp.runSettings settings (serve (Proxy :: Proxy API) (server dir))
+  Warp.runSettings settings (app dir)
   where
     settings
       = Warp.setPort 8080
@@ -275,13 +277,5 @@ prop_crudWebserverFile =
 
 prop_crudWebserverFileParallel :: Property
 prop_crudWebserverFileParallel =
-  monadicParallel sm $ \prog ->
-    prettyParallelProgram prog =<< runParallelProgram sm prog
-
-------------------------------------------------------------------------
-
-test :: IO ()
-test = do
-  progs <- sample' $ flip evalStateT initModel $ generateProgram generator preconditions transitions 0
-  let prog = progs !! 10
-  mapM_ print (splitProgram initModel preconditions transitions prog)
+  monadicParallel' sm $ \prog ->
+    prettyParallelProgram' prog =<< runParallelProgram'' 10 sm prog
