@@ -34,6 +34,7 @@ module Test.StateMachine
 
     -- * Parallel property combinators
   , ParallelProgram
+  , ParallelProgram'
   , forAllParallelProgram
   , History
   , monadicParallel
@@ -366,5 +367,5 @@ prettyParallelProgram'
   -> [(History act err, Property)] -- ^ Output of 'runParallelProgram'.
   -> PropertyM m ()
 prettyParallelProgram' prog
-  = mapM_ (\(_, prop) ->
-              print prog `whenFailM` prop)
+  = mapM_ (\(hist, prop) ->
+              print (toBoxDrawings' prog hist) `whenFailM` prop)

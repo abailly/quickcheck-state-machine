@@ -24,6 +24,7 @@ module Test.StateMachine.Internal.Sequential
   , filterInvalid
   , getUsedVars
   , liftShrinkInternal
+  , validProgram
   , shrinkProgram
   , executeProgram
   )
@@ -117,6 +118,23 @@ liftShrinkInternal :: Shrinker act -> (Internal act -> [Internal act])
 liftShrinkInternal shrinker (Internal act sym) =
   [ Internal act' sym | act' <- shrinker act ]
 
+validProgram
+  :: forall act model err
+  .  HFoldable act
+  => Precondition model act
+  -> Transition' model act err
+  -> model Symbolic
+  -> Program act
+  -> Bool
+validProgram precondition transition model0 = go model0 S.empty . unProgram
+  where
+  go :: model Symbolic -> Set Var -> [Internal act] -> Bool
+  go _     _     []                                     = True
+  go model scope (Internal act sym@(Symbolic var) : is) =
+    valid && go (transition model act (Success sym)) (S.insert var scope) is
+    where
+    valid = precondition model act && getUsedVars act `S.isSubsetOf` scope
+
 -- | Shrink a program in a pre-condition and scope respecting way.
 shrinkProgram
   :: HFoldable act
@@ -127,10 +145,8 @@ shrinkProgram
   ->  Program act             -- ^ Program to shrink.
   -> [Program act]
 shrinkProgram shrinker precondition transition model
-  = map ( flip evalState (model, S.empty)
-        . filterInvalid precondition transition
-        . Program
-        )
+  = filter (validProgram precondition transition model)
+  . map Program
   . shrinkList (liftShrinkInternal shrinker)
   . unProgram
 

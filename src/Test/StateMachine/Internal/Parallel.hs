@@ -28,6 +28,7 @@ module Test.StateMachine.Internal.Parallel
   , executeParallelProgram'
   , linearise
   , toBoxDrawings
+  , toBoxDrawings'
   , splitProgram
   ) where
 
@@ -140,23 +141,6 @@ shrinkParallelProgram' shrinker precondition transition model (ParallelProgram' 
                                   (shrinkList (shrinkList (liftShrinkInternal shrinker)))
                                   (unProgram prefix, map unProgram suffixes)
       ]
-
-validProgram
-  :: forall act model err
-  .  HFoldable act
-  => Precondition model act
-  -> Transition' model act err
-  -> model Symbolic
-  -> Program act
-  -> Bool
-validProgram precondition transition model0 = go model0 S.empty . unProgram
-  where
-  go :: model Symbolic -> Set Var -> [Internal act] -> Bool
-  go _     _     []                                     = True
-  go model scope (Internal act sym@(Symbolic var) : is) =
-    valid && go (transition model act (Success sym)) (S.insert var scope) is
-    where
-    valid = precondition model act && getUsedVars act `S.isSubsetOf` scope
 
 validParallelProgram
   :: HFoldable act
@@ -313,14 +297,41 @@ anyP' p xs = anyP p xs
 -- | Draw an ASCII diagram of the history of a parallel program. Useful for
 --   seeing how a race condition might have occured.
 toBoxDrawings :: HFoldable act => ParallelProgram act -> History act err -> Doc
-toBoxDrawings prog = toBoxDrawings' allVars
+toBoxDrawings prog = toBoxDrawings'' allVars
   where
   allVars       = S.unions [l0, p0, r0]
   Fork l0 p0 r0 = fmap (S.unions . vars . unProgram) (unParallelProgram prog)
   vars xs       = [ getUsedVars x | Internal x _ <- xs]
 
-  toBoxDrawings' :: Set Var -> History act err -> Doc
-  toBoxDrawings' knownVars (History h) = exec evT (fmap out <$> Fork l p r)
+  toBoxDrawings'' :: Set Var -> History act err -> Doc
+  toBoxDrawings'' knownVars (History h) = exec evT (fmap out <$> Fork l p r)
+    where
+      (p, h') = partition (\e -> getProcessIdEvent e == Pid 0) h
+      (l, r)  = partition (\e -> getProcessIdEvent e == Pid 1) h'
+
+      out :: HistoryEvent act err -> String
+      out (InvocationEvent _ str var _)
+        | var `S.member` knownVars = show var ++ " ← " ++ str
+        | otherwise = str
+      out (ResponseEvent _ str _) = str
+
+      toEventType :: [HistoryEvent act err] -> [(EventType, Pid)]
+      toEventType = map go
+        where
+        go e = case e of
+          InvocationEvent _ _ _ pid -> (Open,  pid)
+          ResponseEvent   _ _   pid -> (Close, pid)
+
+      evT :: [(EventType, Pid)]
+      evT = toEventType (filter (\e -> getProcessIdEvent e `elem` map Pid [1,2]) h)
+
+toBoxDrawings' :: HFoldable act => ParallelProgram' act -> History act err -> Doc
+toBoxDrawings' (ParallelProgram' prefix suffixes) = toBoxDrawings'' allVars
+  where
+  allVars = usedVars prefix `S.union` foldMap usedVars suffixes
+
+  toBoxDrawings'' :: Set Var -> History act err -> Doc
+  toBoxDrawings'' knownVars (History h) = exec evT (fmap out <$> Fork l p r)
     where
       (p, h') = partition (\e -> getProcessIdEvent e == Pid 0) h
       (l, r)  = partition (\e -> getProcessIdEvent e == Pid 1) h'

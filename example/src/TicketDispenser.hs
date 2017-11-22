@@ -29,7 +29,7 @@ module TicketDispenser
 import           Data.Dynamic
                    (cast)
 import           Data.Functor.Classes
-                   (Eq1(..), Show1, liftShowsPrec)
+                   (Eq1(..))
 import           Prelude                                  hiding
                    (readFile)
 import           System.Directory
@@ -54,7 +54,7 @@ import           Test.StateMachine.Internal.Types
 import           Test.StateMachine.Internal.Utils
                    (shrinkPropertyHelperC)
 import           Test.StateMachine.TH
-                   (deriveTestClasses)
+                   (deriveTestClasses, deriveShows)
 
 ------------------------------------------------------------------------
 
@@ -64,13 +64,8 @@ data Action (v :: * -> *) :: * -> * where
   TakeTicket :: Action v Int
   Reset      :: Action v ()
 
-deriving instance Show1 v => Show (Action v resp)
-
 -- Which correspond to taking a ticket and getting the next number, and
 -- resetting the number counter of the dispenser.
-
-instance Show1 (Action Symbolic) where
-  liftShowsPrec _ _ _ x _ = show x
 
 ------------------------------------------------------------------------
 
@@ -149,6 +144,7 @@ semantics se (tdb, tlock) cmd = case cmd of
 
 ------------------------------------------------------------------------
 
+deriveShows       ''Action
 deriveTestClasses ''Action
 
 ------------------------------------------------------------------------
@@ -184,16 +180,17 @@ prop_ticketDispenser files = monadicSequential sm' $ \prog -> do
   where
   sm' = sm Shared files
 
-prop_ticketDispenserParallel :: SharedExclusive -> DbLock -> PropertyOf (ParallelProgram Action)
+prop_ticketDispenserParallel
+  :: SharedExclusive -> DbLock -> PropertyOf (ParallelProgram' Action)
 prop_ticketDispenserParallel se files =
-  monadicParallelC sm' $ \prog ->
-    prettyParallelProgram prog =<< runParallelProgram' 100 sm' prog
+  monadicParallelC' sm' $ \prog ->
+    prettyParallelProgram' prog =<< runParallelProgram'' 100 sm' prog
   where
   sm' = sm se files
 
 -- So long as the file locks are exclusive, i.e. not shared, the
 -- parallel property passes.
-prop_ticketDispenserParallelOK :: DbLock -> PropertyOf (ParallelProgram Action)
+prop_ticketDispenserParallelOK :: DbLock -> PropertyOf (ParallelProgram' Action)
 prop_ticketDispenserParallelOK = prop_ticketDispenserParallel Exclusive
 
 -- If we allow file locks to be shared, then we get race conditions as
@@ -201,15 +198,18 @@ prop_ticketDispenserParallelOK = prop_ticketDispenserParallel Exclusive
 -- counterexamples are found.
 prop_ticketDispenserParallelBad :: DbLock -> Property
 prop_ticketDispenserParallelBad files =
-  shrinkPropertyHelperC (prop_ticketDispenserParallel Shared files) $ \(ParallelProgram f) ->
-    any (alphaEqFork f)
-      [ fork [iact Reset 0]      []             [iact Reset 1]
-      , fork [iact TakeTicket 0] [iact Reset 1] [iact TakeTicket 2]
-      , fork [iact Reset 0]      [iact Reset 1] [iact TakeTicket 2]
-      , fork [iact TakeTicket 0] [iact Reset 1] [iact Reset 2]
+  shrinkPropertyHelperC (prop_ticketDispenserParallel Shared files) $ \p ->
+    any (alphaEqParallel p)
+      [ ParallelProgram' (Program [])
+          [Program [iact Reset 0, iact Reset 1]]
+      , ParallelProgram' (Program [iact Reset 1])
+          [Program [iact TakeTicket 0, iact TakeTicket 2]]
+      , ParallelProgram' (Program [iact Reset 1])
+          [Program [iact Reset 0, iact TakeTicket 2]]
+      , ParallelProgram' (Program [iact Reset 1])
+          [Program [iact TakeTicket 0, iact Reset 2]]
       ]
     where
-    fork l p r = Fork (Program l) (Program p) (Program r)
     iact act n = Internal act (Symbolic (Var n))
 
 ------------------------------------------------------------------------

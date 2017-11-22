@@ -6,6 +6,7 @@
 {-# LANGUAGE MultiParamTypeClasses      #-}
 {-# LANGUAGE OverloadedStrings          #-}
 {-# LANGUAGE QuasiQuotes                #-}
+{-# LANGUAGE ScopedTypeVariables        #-}
 {-# LANGUAGE StandaloneDeriving         #-}
 {-# LANGUAGE TemplateHaskell            #-}
 {-# LANGUAGE TypeFamilies               #-}
@@ -44,7 +45,9 @@ import           Control.Concurrent
 import           Control.Concurrent.Async.Lifted
                    (Async, async, cancel, waitEither)
 import           Control.Exception
-                   (bracket)
+                   (SomeException, bracket)
+import           Control.Exception
+                   (catch)
 import           Control.Monad.IO.Class
                    (liftIO)
 import           Control.Monad.Logger
@@ -55,14 +58,17 @@ import           Control.Monad.Trans.Control
                    (MonadBaseControl, liftBaseWith)
 import           Control.Monad.Trans.Resource
                    (ResourceT)
+import qualified Data.ByteString.Char8                    as BS
 import           Data.Char
                    (isPrint)
 import           Data.Dynamic
                    (cast)
 import           Data.Functor.Classes
                    (Eq1)
-import           Data.Functor.Classes
-                   (Show1, liftShowsPrec)
+import           Data.List
+                   (dropWhileEnd)
+import           Data.Monoid
+                   ((<>))
 import           Data.Proxy
                    (Proxy(Proxy))
 import           Data.String.Conversions
@@ -78,6 +84,8 @@ import           Database.Persist.Postgresql
 import           Database.Persist.TH
                    (mkMigrate, mkPersist, persistLowerCase, share,
                    sqlSettings)
+import           Network
+                   (PortID(PortNumber), connectTo)
 import           Network.HTTP.Client
                    (Manager, defaultManagerSettings, newManager)
 import qualified Network.Wai.Handler.Warp                 as Warp
@@ -89,6 +97,10 @@ import           Servant.Client
                    client, runClientM)
 import           Servant.Server
                    (Handler)
+import           System.IO
+                   (Handle, hClose)
+import           System.Process
+                   (callProcess, readProcess)
 import           Test.QuickCheck
                    (Arbitrary, Property, arbitrary, elements,
                    frequency, listOf, shrink, suchThat, (===))
@@ -216,9 +228,6 @@ data Action (v :: * -> *) :: * -> * where
 
 deriving instance Eq1 v => Eq (Action v resp)
 
-instance Eq (Untyped Action) where
-  Untyped act1 == Untyped act2 = cast act1 == Just act2
-
 ------------------------------------------------------------------------
 
 -- * The model.
@@ -298,15 +307,14 @@ sm port = stateMachine
   generator shrinker preconditions transitions
   postconditions initModel semantics (runner port)
 
-connectionString :: ConnectionString
-connectionString = "host=localhost dbname=postgres user=postgres password=mysecretpassword port=5432"
+connectionString :: String -> ConnectionString
+connectionString ip = "host=" <> BS.pack ip
+  <> " dbname=postgres user=postgres password=mysecretpassword port=5432"
 
 crudWebserverDbPort :: Int
-crudWebserverDbPort = 8081
+crudWebserverDbPort = 8083
 
 ------------------------------------------------------------------------
-
--- docker run --net=host --name postgres -e POSTGRES_PASSWORD=mysecretpassword -d postgres:10.1-alpine
 
 prop_crudWebserverDbRace :: Property
 prop_crudWebserverDbRace =
@@ -318,8 +326,11 @@ prop_crudWebserverDbRace =
     sm' = sm crudWebserverDbPort
 
 withCrudWebserverDbRace :: Bug -> IO () -> IO ()
-withCrudWebserverDbRace bug =
-  bracketServer (setup bug connectionString crudWebserverDbPort)
+withCrudWebserverDbRace bug run =
+  bracket
+    (setup bug connectionString crudWebserverDbPort)
+    cleanup
+    (const run)
 
 ------------------------------------------------------------------------
 
@@ -354,9 +365,15 @@ prop_dbShrinkRace = shrinkPropertyHelperC prop_crudWebserverDbRaceParallel $ \pp
   iact act n = Internal act (Symbolic (Var n))
   sym0       = Symbolic (Var 0)
 
+instance Eq (Untyped Action) where
+  Untyped act1 == Untyped act2 = cast act1 == Just act2
+
 withCrudWebserverDbRaceParallel :: Bug -> IO () -> IO ()
-withCrudWebserverDbRaceParallel bug =
-  bracketServer (setup bug connectionString crudWebserverDbParallelPort)
+withCrudWebserverDbRaceParallel bug run =
+  bracket
+    (setup bug connectionString crudWebserverDbParallelPort)
+    cleanup
+    (const run)
 
 ------------------------------------------------------------------------
 
@@ -366,7 +383,7 @@ withCrudWebserverDbRaceParallel bug =
 
 
 crudWebserverDbParallelPort :: Int
-crudWebserverDbParallelPort = 8082
+crudWebserverDbParallelPort = 8084
 
 instance Arbitrary User where
   arbitrary = User <$> (T.pack <$> listOf (arbitrary `suchThat` isPrint))
@@ -377,24 +394,23 @@ runner port p = do
   mgr <- newManager defaultManagerSettings
   runReaderT p (ClientEnv mgr (burl port))
 
-bracketServer :: IO (Async ()) -> IO () -> IO ()
-bracketServer start run =
-  bracket start cancel (const run)
-
 burl :: Warp.Port -> BaseUrl
 burl port = BaseUrl Http "localhost" port ""
 
-setup :: MonadBaseControl IO m => Bug -> ConnectionString -> Warp.Port -> m (Async ())
+setup
+  :: MonadBaseControl IO m
+  => Bug -> (String -> ConnectionString) -> Warp.Port -> m (String, Async ())
 setup bug conn port = liftBaseWith $ \_ -> do
+  (pid, dbIp) <- setupDb
   signal   <- newEmptyMVar
-  aServer  <- async (runServer bug conn port (putMVar signal ()))
+  aServer  <- async (runServer bug (conn dbIp) port (putMVar signal ()))
   aConfirm <- async (takeMVar signal)
   ok <- waitEither aServer aConfirm
   case ok of
     Right () -> do
       mgr <- newManager defaultManagerSettings
       healthy mgr 10
-      return aServer
+      return (pid, aServer)
     Left () -> error "Server should not return"
   where
   healthy :: Manager -> Int -> IO ()
@@ -406,6 +422,47 @@ setup bug conn port = liftBaseWith $ \_ -> do
         threadDelay 1000000
         healthy mgr (tries - 1)
       Right () -> return ()
+
+setupDb :: IO (String, String)
+setupDb = do
+  pid <- trim <$> readProcess "docker"
+    [ "run"
+    , "-d"
+    , "-e", "POSTGRES_PASSWORD=mysecretpassword"
+    , "postgres:10.1-alpine"
+    ] ""
+  ip <- trim <$> readProcess "docker"
+    [ "inspect"
+    , pid
+    , "--format"
+    , "'{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'"
+    ] ""
+  healthyDb ip
+  return (pid, ip)
+  where
+  trim :: String -> String
+  trim = dropWhileEnd isGarbage . dropWhile isGarbage
+    where
+    isGarbage = flip elem ['\'', '\n']
+
+  healthyDb :: String -> IO ()
+  healthyDb ip = do
+    handle <- go 10
+    hClose handle
+    where
+    go :: Int -> IO Handle
+    go 0 = error "healtyDb: db isn't healthy"
+    go n = do
+      connectTo ip (PortNumber 5432)
+        `catch` (\(_ :: SomeException) -> do
+                    threadDelay 1000000
+                    go (n - 1))
+
+
+cleanup :: (String, Async ()) -> IO ()
+cleanup (pid, aServer) = do
+  callProcess "docker" [ "rm", "-f", pid ]
+  cancel aServer
 
 deriveShows       ''Action
 deriveTestClasses ''Action

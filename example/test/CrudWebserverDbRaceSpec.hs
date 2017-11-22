@@ -1,7 +1,7 @@
 module CrudWebserverDbRaceSpec where
 
 import           Test.Hspec
-                   (Spec, around_, describe, it)
+                   (Spec, around_, beforeAll_, describe, it, xit)
 import           Test.Hspec.QuickCheck
                    (modifyMaxSuccess)
 import           Test.QuickCheck
@@ -14,7 +14,7 @@ import           CrudWebserverDbRace
 spec :: Spec
 spec = do
 
-  around_ (withCrudWebserverDbRace None) $
+  around_ (withCrudWebserverDbRace None) $ modifyMaxSuccess (const 10) $
 
     describe "Sequential property" $
 

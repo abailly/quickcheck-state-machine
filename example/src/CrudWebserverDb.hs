@@ -64,8 +64,6 @@ import           Control.Monad.Trans.Resource
                    (ResourceT)
 import           Data.Char
                    (isPrint)
-import           Data.Functor.Classes
-                   (Show1, liftShowsPrec)
 import           Data.Proxy
                    (Proxy(Proxy))
 import           Data.String.Conversions

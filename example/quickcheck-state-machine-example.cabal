@@ -20,6 +20,7 @@ library
   build-depends:       aeson
                      , async
                      , base >= 4.7 && < 5
+                     , bytestring
                      , containers
                      , directory
                      , filelock
@@ -29,10 +30,12 @@ library
                      , monad-control
                      , monad-logger
                      , mtl
+                     , network
                      , persistent
                      , persistent-postgresql
                      , persistent-sqlite
                      , persistent-template
+                     , process
                      , QuickCheck
                      , quickcheck-instances
                      , quickcheck-with-counterexamples
